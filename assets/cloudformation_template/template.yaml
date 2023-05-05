@@ -1,0 +1,354 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: "AWS::Serverless-2016-10-31"
+
+Description: "Amazon Rekognition Face Reindex Solution"
+
+Parameters:
+  AssetsBucket:
+    Type: String
+    Description: Specify the name of the bucket where the assets are located.
+    Default: "MyUniqueBucket"
+
+  RekognitionIndexFacesTPSLimit:
+    Type: Number
+    Description: Specify your Rekognition IndexFaces API TPS Limit.
+    Default: "50"
+
+  RekognitionIndexFacesQualityFilter:
+    Type: String
+    Description: A filter that specifies a quality bar for how much filtering is done to identify faces. Filtered faces aren't indexed. If you specify AUTO, Amazon Rekognition chooses the quality bar. If you specify LOW, MEDIUM, or HIGH, filtering removes all faces that don?t meet the chosen quality bar. The default value is AUTO.
+    Default: "AUTO"
+
+Resources:
+
+  # Reindex Lambda Function & Role & Trigger
+  # Reindex SQS & DLQ
+  # DynamoDB Lambda Function & Role & Trigger
+  # DynamoDB SQS & DLQ
+  # DynamoDB Table
+  # Step Functions Workflow & Role
+  # Process Record Lambda Function & Role
+  # CheckSQS Lambda Function & Role
+
+  CheckSQSFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+        AssumeRolePolicyDocument:
+            Statement:
+                Effect: Allow
+                Principal:
+                    Service: lambda.amazonaws.com
+                Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/AWSLambdaExecute
+          - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+
+  CheckSQSFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+        Code:
+            S3Bucket: !Ref AssetsBucket
+            S3Key: "assets/lambda_functions/lambda_checksqs.zip"
+        FunctionName: !Sub "CheckSQSLambda-${AWS::StackName}"
+        Handler: lambda_checksqs.lambda_handler
+        MemorySize: 128
+        Environment:
+            Variables:
+                reindexsqsurl: !Ref ReindexQueue
+                dynamosqsurl: !Ref ResultsToDynamoQueue
+        Role: !GetAtt CheckSQSFunctionRole.Arn
+        Runtime: python3.10
+        Timeout: 20
+
+  ProcessingFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+        AssumeRolePolicyDocument:
+            Statement:
+                Effect: Allow
+                Principal:
+                    Service: lambda.amazonaws.com
+                Action: sts:AssumeRole
+        ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/AWSLambdaExecute
+            - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+
+  ProcessingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref AssetsBucket
+        S3Key: "assets/lambda_functions/lambda_processing.zip"
+      FunctionName: !Sub "ProcessingLambda-${AWS::StackName}"
+      Handler: lambda_processing.lambda_handler
+      MemorySize: 128
+      Environment:
+        Variables:
+          reindexsqsurl: !Ref ReindexQueue
+      Role: !GetAtt ProcessingFunctionRole.Arn
+      Runtime: python3.10
+      Timeout: 20
+
+  ReindexFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaExecute
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonRekognitionFullAccess
+        - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+
+  ReindexFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref AssetsBucket
+        S3Key: "assets/lambda_functions/lambda_reindex.zip"
+      FunctionName: !Sub "FaceReIndexLambda-${AWS::StackName}"
+      Handler: lambda_reindex.lambda_handler
+      MemorySize: 128
+      Environment:
+        Variables:
+          dynamosqsurl: !Ref ResultsToDynamoQueue
+          qualityfilter: !Ref RekognitionIndexFacesQualityFilter
+      Role: !GetAtt ReindexFunctionRole.Arn
+      Runtime: python3.10
+      Timeout: 20
+
+  ReindexQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "FaceReindexQueue-${AWS::StackName}"
+      ReceiveMessageWaitTimeSeconds: 0
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FaceReindexDLQ.Arn
+        maxReceiveCount: 5
+      VisibilityTimeout: 30
+
+  FaceReindexDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "FaceReindexDLQ-${AWS::StackName}"
+      RedriveAllowPolicy: '{"redrivePermission":"allowAll"}'
+
+  EventSourceReindex:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      Enabled: true
+      EventSourceArn: !GetAtt ReindexQueue.Arn
+      FunctionName: !GetAtt ReindexFunction.Arn
+      ScalingConfig:
+        MaximumConcurrency: !Ref RekognitionIndexFacesTPSLimit
+
+  ResultsToDynamoFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+        AssumeRolePolicyDocument:
+            Statement:
+              Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+
+  ResultsToDynamoFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref AssetsBucket
+        S3Key: "assets/lambda_functions/lambda_dynamo.zip"
+      FunctionName: !Sub "ResultsToDynamo-${AWS::StackName}"
+      Handler: lambda_dynamo.lambda_handler
+      MemorySize: 128
+      Environment:
+        Variables:
+          dynamoTable: !Ref DynamoDBTable
+      Role: !GetAtt ResultsToDynamoFunctionRole.Arn
+      Runtime: python3.10
+      Timeout: 10
+
+  ResultsToDynamoQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "ResultsToDynamoQueue-${AWS::StackName}"
+      ReceiveMessageWaitTimeSeconds: 0
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ResultsToDynamoDLQ.Arn
+        maxReceiveCount: 5
+      VisibilityTimeout: 30
+
+  ResultsToDynamoDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "ResultsToDynamoDLQ-${AWS::StackName}"
+      RedriveAllowPolicy: '{"redrivePermission":"allowAll"}'
+
+  EventSourceResultsToDynamo:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      Enabled: true
+      EventSourceArn: !GetAtt ResultsToDynamoQueue.Arn
+      FunctionName: !GetAtt ResultsToDynamoFunction.Arn
+
+  #DynamoDBTable
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+        TableName: !Sub "ReIndexResults-${AWS::StackName}"
+        AttributeDefinitions:
+            -   AttributeName: "OldFaceId"
+                AttributeType: "S"
+        KeySchema:
+            -   AttributeName: "OldFaceId"
+                KeyType: HASH
+        ProvisionedThroughput:
+            ReadCapacityUnits: 5
+            WriteCapacityUnits: 5
+
+  StateMachineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+        ManagedPolicyArns:
+            - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+            - arn:aws:iam::aws:policy/AWSLambda_FullAccess
+            - arn:aws:iam::aws:policy/AWSStepFunctionsFullAccess
+            
+        AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+                Effect: "Allow"
+                Principal:
+                    Service:
+                        - !Sub states.${AWS::Region}.amazonaws.com
+                Action: "sts:AssumeRole"
+  StateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      RoleArn:
+        Fn::GetAtt:
+            - StateMachineRole
+            - Arn
+      StateMachineName: !Sub "${AWS::StackName}-StepFunctionsWorkflow"
+      DefinitionString:
+        !Sub
+        - |-
+            {
+              "Comment": "A description of my state machine",
+              "StartAt": "File Analysis",
+              "States": {
+                "File Analysis": {
+                  "Type": "Map",
+                  "ItemProcessor": {
+                    "ProcessorConfig": {
+                      "Mode": "DISTRIBUTED",
+                      "ExecutionType": "STANDARD"
+                    },
+                    "StartAt": "ProcessRecords",
+                    "States": {
+                      "ProcessRecords": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::lambda:invoke",
+                        "OutputPath": "$.Payload",
+                        "Parameters": {
+                          "Payload.$": "$",
+                          "FunctionName": "${lambdaProcessRecords}"
+                        },
+                        "Retry": [
+                          {
+                            "ErrorEquals": [
+                              "Lambda.ServiceException",
+                              "Lambda.AWSLambdaException",
+                              "Lambda.SdkClientException",
+                              "Lambda.TooManyRequestsException"
+                            ],
+                            "IntervalSeconds": 2,
+                            "MaxAttempts": 6,
+                            "BackoffRate": 2
+                          }
+                        ],
+                        "End": true
+                      }
+                    }
+                  },
+                  "Label": "FileAnalysis",
+                  "ItemReader": {
+                    "Resource": "arn:aws:states:::s3:getObject",
+                    "ReaderConfig": {
+                      "InputType": "JSON",
+                      "MaxItems": 100000000
+                    },
+                    "Parameters": {
+                      "Bucket.$": "$.bucket",
+                      "Key.$": "$.key"
+                    }
+                  },
+                  "MaxConcurrency": 1000,
+                  "Next": "CheckSQS"
+                },
+                "CheckSQS": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::lambda:invoke",
+                  "OutputPath": "$.Payload",
+                  "Parameters": {
+                    "FunctionName": "${lambdaCheckSQS}"
+                  },
+                  "Retry": [
+                    {
+                      "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException",
+                        "Lambda.TooManyRequestsException"
+                      ],
+                      "IntervalSeconds": 2,
+                      "MaxAttempts": 6,
+                      "BackoffRate": 2
+                    }
+                  ],
+                  "Next": "Choice"
+                },
+                "Choice": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.queuesAreEmpty",
+                      "BooleanEquals": false,
+                      "Next": "Wait"
+                    }
+                  ],
+                  "Default": "Success"
+                },
+                "Wait": {
+                  "Type": "Wait",
+                  "Seconds": 60,
+                  "Next": "CheckSQS"
+                },
+                "Success": {
+                  "Type": "Succeed"
+                }
+              }
+            }
+        - {
+            lambdaCheckSQS: !GetAtt [ CheckSQSFunction, Arn ],
+            lambdaProcessRecords: !GetAtt [ ProcessingFunction, Arn ]
+        }
+
+Outputs:
+  StepFunctionsWorkflowUrl:
+    Description: "URL of the Step Functions Workflow"
+    Value: !Ref StateMachine
+
+  DynamoDBTable:
+    Description: "Name of the DynamoDB Table"
+    Value: !Ref DynamoDBTable
