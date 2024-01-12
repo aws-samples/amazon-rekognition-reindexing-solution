@@ -79,7 +79,8 @@ Information regarding each reindex operation will be stored into Amazon DynamoDB
 
 Here is a list of additional sections included in this repository:
 
-* **Helper Modules:** We have created a notebook to help you create the records file.  
+* **Helper Modules:** We have created a notebook to help you create the records file. 
+* **Documentation:** Details about the reindexing process
 
 ## Security
 
