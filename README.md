@@ -1,8 +1,10 @@
 # Amazon Rekognition Face Collection ReIndexing Solution
 
-This solution allows customers to migrate their Amazon Rekognition face collections to the newest FaceModelVersion available. 
+#### TL;DR: This solution allows customers to migrate their Amazon Rekognition face collections to the newest FaceModelVersion available.
 
-The solution is already packaged into an Amazon CloudFormation template. AWS CloudFormation is a service that helps you model and set up your AWS resources so that you can spend less time managing those resources and more time focusing on your applications that run in AWS. 
+Face Collections is an Amazon Rekognition feature, which simplifies the management of face data for facial recognition tasks. These collections enable users to create and index sets of unique faces, allowing for efficient searching and comparison of faces within a collection or against stored faces. 
+
+Face Collections find applications in user authentication, identity verification, and organizing visual content based on detected individuals. The integration of Face Collections with other AWS services, along with its ability to search and compare faces, makes it a versatile tool for building scalable solutions in various domains, from security systems to content management and analysis.
 
 ### Solution Architecture
 
@@ -10,105 +12,74 @@ The solution is already packaged into an Amazon CloudFormation template. AWS Clo
 
 ## Solution Deployment
 
-### Configure your Amazon SageMaker Studio Environment
-To configure and deploy the solution we have created a Jupyter Notebook containing all the needed steps. Amazon Sagemaker
-Studio allows you to access fully managed Jupyter notebooks. If you don't have an existing Studio environment, you can follow
-the instructions in [this guide](https://catalog.us-east-1.prod.workshops.aws/workshops/63069e26-921c-4ce1-9cc7-dd882ff62575/en-US/prerequisites/option2). 
+The solution is already packaged into an AWS CloudFormation template. AWS CloudFormation is a service that helps you model and set up your AWS resources so that you can spend less time managing those resources and more time focusing on your applications that run in AWS. 
 
-### Download this repository
-When you have your environment ready, open a new Terminal and type the following command:
+Launch one of the following AWS CloudFormation Templates in your account (The link will automatically open the AWS CloudFormation console). 
+- [Launch solution in N.Virginia - us-east-1](https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/review?templateURL=https://rkra-us-east-1.s3.us-east-1.amazonaws.com/assets/template.yaml&stackName=remember-only-lowercase&unique)
+- [Launch solution in Oregon - us-west-2](https://us-west-2.console.aws.amazon.com/cloudformation/home?region=us-west-2#/stacks/create/review?templateURL=https://rkra-us-west-2.s3.us-west-2.amazonaws.com/assets/template.yaml&stackName=remember-only-lowercase&unique)
+- [Launch solution in Ireland - eu-west-1](https://eu-west-1.console.aws.amazon.com/cloudformation/home?region=eu-west-1#/stacks/create/review?templateURL=https://rkra-eu-west-1.s3.eu-west-1.amazonaws.com/assets/template.yaml&stackName=remember-only-lowercase&unique)
 
-```git clone https://github.com/aws-samples/amazon-rekognition-reindexing-solution.git```
+You will need to specify the following parameters in the template:
 
-In the File Browser you should see an **assets** folder and a notebook named **0-Data-Preparation.ipynb**.
+1. **Template name:** A name for the template. Resources will include this name in their resource name, 🔴 **make sure it is unique and lowercase** 🔴.  
+2. **Rekognition IndexFaces TPS Limit:** Transactions Per Second (TPS) are most relevant at the peak of an expected workload. Default TPS is 50, but you can reach out to AWS to have this limit increased. This value matched the concurrent Lambda functions in charge of reindexing a collection. 
+3. **LambdaMaxConcurrencyAvailable:** Specify your Lambda Concurrency Quota for your account. This will speed up the process. **Max Value is 10000**.
+4. **Rekognition IndexFaces Quality Filter:** A filter that specifies a quality bar for how much filtering is done to identify faces. Filtered faces aren't indexed. If you specify AUTO, Amazon Rekognition chooses the quality bar. If you specify LOW, MEDIUM, or HIGH, filtering removes all faces that don?t meet the chosen quality bar. The default value is AUTO.
 
-Open the notebook to prepare your face collection dataset, once finished, open **1-ReIndex-Solution.ipynb** to deploy and launch the reindex solution.
+Wait until the service finishes deploying the template provided. Head over to the **Outputs** tab in AWS CloudFormation to find the link to a new Amazon S3 bucket created.
 
-## Solution Walkthrough
+## Launch a new indexing process
 
-### Data Preparation
+### Expected data format 
 
-The first step of the solution is to prepare your face collection data. We provide a notebook which helps you gather your faceid records and merge it with the S3 bucket and key of the image used originally to index the faces. At the end of the notebook, your records will be sent to Amazon S3 ready to be sent to the reindexing process. 
+The solution will take in as input your face collection data as a JSON file. The file will contain a list of records containing the information about the original pictures and indexed faces. 
 
 Data records should adhere to the following structure for the reindexing solution to function correctly:
+
 ```
-[
-    {
+[ #List of Images
+    { #Image1
         "Bucket": String,
         "Key": String,
-        "ExternalImageId": String,
-        "CollectionId": String,
-        "Faces": [
-            {
-            "UserId": String, // Optional
+        "ExternalImageId": String, #Optional value 
+        "CollectionId": String, #Name of the new collection to store faces into
+        "Faces": [ #List of original indexed faces in Image1
+          {                         
+            "UserId": String, #Optional value
             "FaceId": String,
             "ImageId": String,
             "BoundingBoxes": {
-                "Width": Float,
-                "Height": Float,
-                "Left": Float,
-                "Top": Float
-                }
+              "Width": Float,
+              "Height": Float,
+              "Left": Float,
+              "Top": Float
             }
+          }
         ]
     }
-]   
+]      
 ```
 
-### Solution Deployment and Re-index Kickoff
+You can retrieve most of the information using the Rekognition ListFaces() function. You also have available a Jupyter Notebook in the **helper modules** folder to help you prepare this data.
 
-The solution is already packaged into an Amazon CloudFormation template. AWS CloudFormation is a service that helps you model and set up your AWS resources so that you can spend less time managing those resources and more time focusing on your applications that run in AWS. We provide you a Jupyter Notebook to automatically deploy the solution and kick off the reindexing process by starting an AWS Step Functions execution passing in the records uploaded to Amazon S3 in the previous notebook. 
+### Indexing process kickoff
 
-The entry point will be an Amazon SQS queue which will receive and store the messages to be processed. 
+**🔴 IMPORTANT PREREQUISITES BEFORE LAUNCHING AN INDEXING PROCESS🔴**
 
-The Step Functions state machine manages a workflow which breaks down into the following steps:
+* **You need to create a folder named "records" inside the Amazon S3 bucket.**
+* **You need to previously create the new collections where faces will be indexed.** 
 
-* **File Analysis:** The state machine receives the JSON file from S3, splits it into X items and triggers AWS Lambdas to process the batches of records. 
-* **ProcessRecords:** The processing lambda reads the records and sends them to the FaceReindexQueue.
-* **CheckSQS:** The state machine checks if the SQS are empty to finalise the execution. 
+Once you have deployed the solution and prepared your face records following the structure in the step above, you are ready to begin a reindexing process. You only need to upload your JSON file to the records folder inside the generated Amazon S3 bucket. Once the file lands inside the bucket a new Step Functions state machine will be triggered. 
 
-![Step Functions](images/step-functions.png)
+### Indexing Results
 
+Information regarding each reindex operation will be stored into Amazon DynamoDB table, which can later on be exported as a CSV file for internal processing. If any errors occur during the indexing will also be stored a logs table for easy review. 
 
-### Index the faces into the new face collection 
+## Other sections 
 
-The next stage of the solution covers the process of indexing the faces into a new face collection using the updated Face Model Version. As messages arrive to the Amazon SQS queue, AWS Lambda functions will be triggered to index the face into the new collection. 
+Here is a list of additional sections included in this repository:
 
-AWS Lambda is a compute service that lets you run code without provisioning or managing servers. Lambda runs your code on a high-availability compute infrastructure and performs all of the administration of the compute resources, including server and operating system maintenance, capacity provisioning and automatic scaling, and logging. With Lambda, you can run code for virtually any type of application or backend service. All you need to do is supply your code in one of the languages that Lambda supports.
-
-When working at large scale, we need to keep in mind the concurrency and TPS limits of the services we are using. Here is the list of Amazon Rekognition default limitsper API for every region. As we are going to use the IndexFace API, we need to limit the number of AWS Lambdas which process messages from the SQS queue at the same time. To achieve this, we are going to match the TPS limit to the SQS Maximum Lambda concurrency. This feature controls the maximum number of concurrent Lambda functions invoked by Amazon SQS as an event source.
-
-
-We also need to verify we are re-indexing the same face. Rekognition Face Models improve over time and may provide better bounding boxes coordinates or detect more faces in the same image. To make sure we are indexing the same face we can use Intersection Over Union, which will measure the overlap between the old and new bounding boxes. If the percentage of overlap overcomes the threshold set, we can assume it is the same face. Records which don’t meet the threshold, or no faces are found will be sent to a Dead Letter Queuewhere customers can review manually. 
-
-### Store the updated information
-
-The last stage of the solution is designed to store the output and updated data into a datastore. In this case we are inserting the data into Amazon DynamoDB, which can later on be exported as a CSV file for internal processing. 
-
-Amazon DynamoDB is a fully managed NoSQL database service that provides fast and predictable performance with seamless scalability. DynamoDB lets you offload the administrative burdens of operating and scaling a distributed database so that you don't have to worry about hardware provisioning, setup and configuration, replication, software patching, or cluster scaling.
-
-The process is similar to the previous stage. Successful indexing messages will arrive to the Amazon SQS queue in charge of sending the results to our DynamoDB table. Amazon Lambda functions will be triggered upon arrival and where data will be inserted into the table using the DynamoDB boto3 client. If there is any error during the lambda execution, the message will be moved to a dead letter queue for manual revision. 
-
-Here are the fields you will get back to process internally:
-
-**UserID:**	Unique identifier that the customer assigned to a user, which is  internally mapped to a FaceId.
-
-**FaceId:**	Unique identifier that Amazon Rekognition assigned to the face.
-
-**OldFaceId:**	FaceId assigned in the older version collection.
-
-**ImageId:**	Unique identifier that Amazon Rekognition assigned to the input  image.
-
-**OldImageId:**	ImageId assigned in the older version collection.
-
-**ExternalImageId:**	Identifier the customer assigned to the face in the input image.
-
-**Bucket:**	Name of the Amazon S3 bucket where the user image is located.
-
-**File:**	Name of the Amazon S3 key which refers to the photo in the bucket. 
-
-Once all the re-indexing messages have been processed you can head over to your dynamo table and download your items as a CSV file or export your table to Amazon S3. 
-
+* **Helper Modules:** We have created a notebook to help you create the records file.  
 
 ## Security
 

@@ -18,6 +18,9 @@ def bboxesProvided(ProvidedFaces):
     return complete
 
 
+# def validateSchema(ProvidedFaces): TODO
+
+
 def calculate_iou(bb1, bb2):
     bb1_x1, bb1_x2, bb1_y1, bb1_y2 = bb1["Left"], bb1["Left"] + bb1["Width"], bb1["Top"], bb1["Top"] + bb1["Height"]
     bb2_x1, bb2_x2, bb2_y1, bb2_y2 = bb2["Left"], bb2["Left"] + bb2["Width"], bb2["Top"], bb2["Top"] + bb2["Height"]
@@ -56,19 +59,56 @@ def sendResultstoDynamo(updatedRecords):
     print("Message Sent to DynamoDB queue")
 
 
+def sendLogstoDynamo(payload, error, dynamodb_table_name=os.environ['dynamologs']):
+    dynamodb = boto3.resource('dynamodb')
+    table = dynamodb.Table(dynamodb_table_name)
+
+    # Extract FaceId from the payload
+    faces = payload.get('Faces', [])
+    face_id = faces[0].get('FaceId') if faces else 'NO_FACE_ID'
+
+    log_entry = {
+        'FaceId': face_id,
+        'Payload': json.dumps(payload),
+        'ErrorReason': error
+    }
+
+    try:
+        if face_id == 'NO_FACE_ID':
+            # If no face is detected, append the payload to the list of payloads
+            response = table.update_item(
+                Key={'FaceId': 'NO_FACE_ID'},
+                UpdateExpression="SET Payloads = list_append(if_not_exists(Payloads, :empty_list), :payload)",
+                ExpressionAttributeValues={
+                    ':empty_list': [],
+                    ':payload': [log_entry],
+                }
+            )
+        else:
+            # If a face is detected, put the log entry directly
+            response = table.put_item(Item=log_entry)
+
+        print("Log entry successfully added to DynamoDB:", response)
+
+    except Exception as e:
+        print("Error while adding log entry to DynamoDB:", e)
+
+
 def lambda_handler(event, context):
     for record in event['Records']:
 
         # Get SQS data
         payload = json.loads(record["body"])
-
+        print(payload)
         # Get the number of faces provided by the customer
         payloadFaces = payload["Faces"]
 
         ## Scenario 1. No faces are provided by the customer.
+        ## TODO -- Replace BBCheck for Schema Validation
         if len(payloadFaces) == 0 or bboxesProvided(payloadFaces) == False:
             print("Faces Received: {}".format(len(payloadFaces)))
-            print("Error, No faces provided by user or missing bounding boxes values")  # Raise error
+            print("Error, No faces provided by user or missing bounding boxes values")
+            sendLogstoDynamo(payload, "No faces provided by user or missing bounding boxes values")
 
         ## Scenario 2. One face is provided by the customer.
         elif len(payloadFaces) == 1:
@@ -85,7 +125,7 @@ def lambda_handler(event, context):
             if len(rekogIndexedFaces) == 0:
                 print("Faces Received: {} -- Faces Indexed: {}".format(len(payloadFaces), len(rekogIndexedFaces)))
                 print("Error, no faces found")  # Raise error
-
+                sendLogstoDynamo(payload, "1 face expected, no faces found.")
             ## Scenario 2.2. Rekognition indexes 1 face
             ## Action 1: Map face if iou is higher than 0.5
             elif len(rekogIndexedFaces) == 1:
@@ -104,7 +144,7 @@ def lambda_handler(event, context):
                             "FaceId": rekogIndexFace["FaceId"],
                             "ImageId": rekogIndexFace["ImageId"],
                             "BoundingBoxes": rekogIndexFace["BoundingBox"],
-                            "IsNewFace":False
+                            "IsNewFace": False
                         }]
                     }
 
@@ -121,9 +161,10 @@ def lambda_handler(event, context):
                             "FaceId": rekogIndexFace["FaceId"],
                             "ImageId": rekogIndexFace["ImageId"],
                             "BoundingBoxes": rekogIndexFace["BoundingBox"],
-                            "IsNewFace":True
+                            "IsNewFace": True
                         }]
                     }
+                    sendLogstoDynamo(payload, "Not able to map face found.")
                 # Send records to Dynamo
                 sendResultstoDynamo(updatedRecords)
 
@@ -132,6 +173,7 @@ def lambda_handler(event, context):
             ## Action 2: Notify new indexed faces
             elif len(rekogIndexedFaces) > 1:
                 print("Faces Received: {} -- Faces Indexed: {}".format(len(payloadFaces), len(rekogIndexedFaces)))
+                sendLogstoDynamo(payload, "Indexed more than 1 expected face.")
                 updatedRecords = {
                     "Bucket": payload["Bucket"],
                     "Key": payload["Key"],
@@ -149,7 +191,7 @@ def lambda_handler(event, context):
                             "FaceId": indexedface["Face"]["FaceId"],
                             "ImageId": indexedface["Face"]["ImageId"],
                             "BoundingBoxes": indexedface["Face"]["BoundingBox"],
-                            "IsNewFace":False
+                            "IsNewFace": False
                         })
                     else:
                         updatedRecords["Faces"].append({
@@ -159,7 +201,7 @@ def lambda_handler(event, context):
                             "FaceId": indexedface["Face"]["FaceId"],
                             "ImageId": indexedface["Face"]["ImageId"],
                             "BoundingBoxes": indexedface["Face"]["BoundingBox"],
-                            "IsNewFace":True
+                            "IsNewFace": True
                         })
 
                 sendResultstoDynamo(updatedRecords)
@@ -179,6 +221,7 @@ def lambda_handler(event, context):
             if len(rekogIndexedFaces) == 0:
                 print("Faces Received: {} -- Faces Indexed: {}".format(len(payloadFaces), len(rekogIndexedFaces)))
                 print("Error, no faces provided")  # Raise error
+                sendLogstoDynamo(payload, ">1 face expected, no faces found.")
 
             ## Scenario 3.2. Rekognition only indexes one face
             ## Action 1: We try to map it to one of the input faces.
@@ -206,7 +249,7 @@ def lambda_handler(event, context):
                             "FaceId": rekogIndexedFace["FaceId"],
                             "ImageId": rekogIndexedFace["ImageId"],
                             "BoundingBoxes": rekogIndexedFace["BoundingBox"],
-                            "IsNewFace":False
+                            "IsNewFace": False
                         })
                     else:
                         updatedRecords["Faces"].append({
@@ -217,7 +260,7 @@ def lambda_handler(event, context):
                             "ImageId": "Not reindexed",
                             "BoundingBoxes": "Not reindexed"
                         })
-
+                sendLogstoDynamo(payload, ">1 face expected, only 1 face found.")
                 sendResultstoDynamo(updatedRecords)
 
             ## Scenario 3.3. Rekognition finds more than one face
@@ -245,7 +288,7 @@ def lambda_handler(event, context):
                                 "FaceId": rekogIndexedFace["Face"]["FaceId"],
                                 "ImageId": rekogIndexedFace["Face"]["ImageId"],
                                 "BoundingBoxes": rekogIndexedFace["Face"]["BoundingBox"],
-                                "IsNewFace":False
+                                "IsNewFace": False
                             })
                             matchedFace = True
                             break
@@ -258,8 +301,9 @@ def lambda_handler(event, context):
                             "FaceId": rekogIndexedFace["Face"]["FaceId"],
                             "ImageId": rekogIndexedFace["Face"]["ImageId"],
                             "BoundingBoxes": rekogIndexedFace["Face"]["BoundingBox"],
-                            "IsNewFace":True
+                            "IsNewFace": True
                         })
+                        sendLogstoDynamo(payload, "Not able to match indexed faces to any of the original input.")
 
                 sendResultstoDynamo(updatedRecords)
 
