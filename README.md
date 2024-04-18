@@ -8,7 +8,7 @@ Face Collections find applications in user authentication, identity verification
 
 ### Solution Architecture
 
-![Architecture](images/architecture.png)
+![Architecture](images/ris-architecture.png)
 
 ## Solution Deployment
 
