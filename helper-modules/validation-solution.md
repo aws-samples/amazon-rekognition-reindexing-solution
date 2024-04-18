@@ -10,7 +10,7 @@ Due to the potential volume of records ranging from hundreds to millions, we hav
 
 ## Solution Architecture
 
-![Architecture](images/rvs-architecture.png)
+![Architecture](../images/rvs-architecture.png)
 
 ## Solution Deployment
 
