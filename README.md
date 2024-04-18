@@ -73,7 +73,7 @@ Once you have deployed the solution and prepared your face records following the
 
 ### Indexing Results
 
-Information regarding each reindex operation will be stored into Amazon DynamoDB table, which can later on be exported as a CSV file for internal processing. If any errors occur during the indexing will also be stored a logs table for easy review. 
+Information regarding each reindex operation will be stored into Amazon DynamoDB table, which can later on be exported to Amazon S3 from the Amazon DynamoDB Console. If any errors occur during the indexing will also be stored a logs table for easy review. 
 
 ## Other sections 
 
