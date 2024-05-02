@@ -7,12 +7,12 @@ Parameters:
 
   RekognitionIndexFacesTPSLimit:
     Type: Number
-    Description: Specify your Rekognition IndexFaces API TPS Limit.
+    Description: Specify your Rekognition IndexFaces API TPS Limit. Reduce the concurrency if you have other business workloads which also require to use Rekognition Index Faces at the same time of using the solution.
     Default: "50"
 
   LambdaMaxConcurrencyAvailable:
     Type: Number
-    Description: Specify your Lambda Concurrency Limit. Max value is 10000.
+    Description: Specify your Lambda Concurrency Limit. Max value is 10000. Reduce the concurrency if you have other business workloads which also require to use AWS Lambda at the same time of using the solution.
     Default: "1000"
 
   RekognitionIndexFacesQualityFilter:
@@ -26,6 +26,11 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub "ris-${AWS::StackName}-bucket"
+
+  ErrorsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "ris-${AWS::StackName}-errors-bucket"
 
   CheckSQSFunctionRole:
     Type: AWS::IAM::Role
@@ -69,6 +74,7 @@ Resources:
         ManagedPolicyArns:
             - arn:aws:iam::aws:policy/AWSLambdaExecute
             - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+            - arn:aws:iam::aws:policy/AmazonKinesisFirehoseFullAccess
 
   ProcessingFunction:
     Type: AWS::Lambda::Function
@@ -82,9 +88,40 @@ Resources:
       Environment:
         Variables:
           reindexsqsurl: !Ref ReindexQueue
+          kinesis_stream: !Ref FirehoseDeliveryStream
       Role: !GetAtt ProcessingFunctionRole.Arn
       Runtime: python3.12
       Timeout: 20
+
+  UpdateConcurrencyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSLambdaExecute
+        - arn:aws:iam::aws:policy/AWSLambda_FullAccess
+
+  UpdateConcurrencyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Sub "rkra-${AWS::Region}"
+        S3Key: "assets/lambda_updateconcurrency.zip"
+      FunctionName: !Sub "RIS-${AWS::StackName}-UpdateConcurrency"
+      Handler: lambda_updateconcurrency.lambda_handler
+      MemorySize: 128
+      Environment:
+        Variables:
+          FUNCTION_NAME: !Sub "RIS-${AWS::StackName}-ReIndexing"
+          MAX_CONCURRENCY_LIMIT: !Ref RekognitionIndexFacesTPSLimit
+      Role: !GetAtt UpdateConcurrencyRole.Arn
+      Runtime: python3.12
+      Timeout: 30
 
   ReindexFunctionRole:
     Type: AWS::IAM::Role
@@ -233,7 +270,7 @@ Resources:
       EventSourceArn: !GetAtt ReindexQueue.Arn
       FunctionName: !GetAtt ReindexFunction.Arn
       ScalingConfig:
-        MaximumConcurrency: !Ref RekognitionIndexFacesTPSLimit
+        MaximumConcurrency: 50
 
   EventSourceResultsToDynamo:
     Type: AWS::Lambda::EventSourceMapping
@@ -266,6 +303,47 @@ Resources:
         - AttributeName: "FaceId"
           KeyType: HASH
       BillingMode: PAY_PER_REQUEST
+
+  FirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: FirehosePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:AbortMultipartUpload'
+                  - 's3:GetBucketLocation'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketMultipartUploads'
+                  - 's3:PutObject'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ErrorsBucket}/validation-results*'
+                  - !GetAtt ErrorsBucket.Arn
+
+  FirehoseDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Sub "RIS-${AWS::StackName}-ValidationResults"
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !GetAtt ErrorsBucket.Arn
+        BufferingHints:
+          IntervalInSeconds: 300
+          SizeInMBs: 5
+        CompressionFormat: UNCOMPRESSED
+        Prefix: "validation-results/"
+        RoleARN: !GetAtt FirehoseRole.Arn
 
   StateMachineRole:
     Type: "AWS::IAM::Role"
@@ -393,7 +471,30 @@ Resources:
                 },
                 "Wait": {
                   "Type": "Wait",
-                  "Seconds": 60,
+                  "Seconds": 300,
+                  "Next": "CheckConcurrency"
+                },
+                "CheckConcurrency": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::lambda:invoke",
+                  "OutputPath": "$.Payload",
+                  "Parameters": {
+                    "Payload.$": "$",
+                    "FunctionName": "${lambdaUpdateConcurrency}"
+                  },
+                  "Retry": [
+                    {
+                      "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException",
+                        "Lambda.TooManyRequestsException"
+                      ],
+                      "IntervalSeconds": 2,
+                      "MaxAttempts": 6,
+                      "BackoffRate": 2
+                    }
+                  ],
                   "Next": "CheckSQS"
                 },
                 "Success": {
@@ -403,6 +504,7 @@ Resources:
             }
         - {
             lambdaCheckSQS: !GetAtt [ CheckSQSFunction, Arn ],
+            lambdaUpdateConcurrency: !GetAtt [ UpdateConcurrencyFunction, Arn ],
             lambdaProcessRecords: !GetAtt [ ProcessingFunction, Arn ],
             lambdaConcurrency: !Ref LambdaMaxConcurrencyAvailable
         }

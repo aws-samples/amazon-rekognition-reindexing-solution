@@ -1,4 +1,4 @@
-import json, boto3, os
+import json, boto3, os, time
 
 rekClient = boto3.client('rekognition')
 sqsClient = boto3.client('sqs')
@@ -306,7 +306,7 @@ def lambda_handler(event, context):
                         sendLogstoDynamo(payload, "Not able to match indexed faces to any of the original input.")
 
                 sendResultstoDynamo(updatedRecords)
-
+    time.sleep(0.6)
     return {
         'statusCode': 200,
         'body': json.dumps('Index Correct')
