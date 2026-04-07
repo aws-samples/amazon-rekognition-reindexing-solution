@@ -79,9 +79,11 @@ Information regarding each reindex operation will be stored into Amazon DynamoDB
 
 Here is a list of additional sections included in this repository:
 
+* **[Cross-Account or Region Migration](CROSS_ACCOUNT_OR_REGION_MIGRATION.md):** Guide for migrating collections across AWS accounts or regions using this solution.
 * **Helper Modules:**
     - You can find a notebook to help you create the records file.
-    - You can find a solution to help you validate your records file. 
+    - You can find a solution to help you validate your records file.
+    - You can find a notebook to help you migrate user vectors after reindexing.
 * **Documentation:** Details about the reindexing process
 
 ## Security
